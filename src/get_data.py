@@ -100,8 +100,12 @@ class CIFARCorrupt(VisionDataset):
 
 
 
-def getData(name='cifar10', train_bs=128, test_bs=512, train_path=None, test_path=None, severity=0, noise='fog'):
-
+def getData(name='cifar10', train_bs=128, test_bs=512, train_path=None, test_path=None, severity=0, noise='fog', normalize=True):
+    def get_norm(mean, std):
+        if normalize: 
+            return transforms.Normalize(mean, std)
+        else:
+            return torch.nn.Identity()
     if name == 'cifar10':
         #mean = [x / 255 for x in [125.3, 123.0, 113.9]]
         #std = [x / 255 for x in [63.0, 62.1, 66.7]]
@@ -112,12 +116,12 @@ def getData(name='cifar10', train_bs=128, test_bs=512, train_path=None, test_pat
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
 
         trainset = datasets.CIFAR10(root='data/cifar', train=True, download=True, transform=transform_train)
@@ -146,12 +150,12 @@ def getData(name='cifar10', train_bs=128, test_bs=512, train_path=None, test_pat
             transforms.RandomCrop(32, padding=4),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
 
         trainset = datasets.CIFAR100(root='data/cifar', train=True, download=True, transform=transform_train)
@@ -175,14 +179,14 @@ def getData(name='cifar10', train_bs=128, test_bs=512, train_path=None, test_pat
             transforms.RandomResizedCrop(224),
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
 
         transform_test = transforms.Compose([
             transforms.Resize(256),
             transforms.CenterCrop(224),
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
         train_set = ImageFolder(root=IMAGENET_TRAIN_FOLDER, transform=transform_train)
         train_loader = torch.utils.data.DataLoader(train_set,
@@ -205,7 +209,7 @@ def getData(name='cifar10', train_bs=128, test_bs=512, train_path=None, test_pat
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
 
         train_loader = None
@@ -227,7 +231,7 @@ def getData(name='cifar10', train_bs=128, test_bs=512, train_path=None, test_pat
 
         transform_test = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean, std),
+            get_norm(mean, std),
         ])
 
         train_loader = None

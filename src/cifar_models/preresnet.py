@@ -189,15 +189,19 @@ class Ensemble(nn.Module):
 
     def forward(self, x, **kwargs):
         data = []
+        extras = []
         for model in self.models:
             output = model(x, **kwargs)
             if isinstance(output, tuple):
+                extras.append(output[1:])
                 data.append(output[0])
             else:
                 data.append(output)
         data = torch.stack(data, dim=0)
         average = torch.mean(data, dim=0)
         # Average logits 
+        if len(extras) > 0:
+            return average, *extras[0]
         return average
         
 

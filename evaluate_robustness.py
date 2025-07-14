@@ -13,6 +13,7 @@ from src.get_data import getData
 from src.cifar_models import Ensemble
 from torch import nn
 from torch.nn import functional as F
+from typing import Union, Tuple
 
 def cls_validate(val_loader, model, time_begin=None):
     model.eval()
@@ -107,14 +108,38 @@ def get_calibration(data_loader, model, debug=False, n_bins=None):
     return ece
 
 def get_parameter_count(model: torch.nn.Module):
-    total = 0
+    pruned_total, total = 0, 0
     for name, param in model.named_parameters():
+        zeros = torch.zeros_like(param)
+        # pruned = (zeros == param).sum()
+        pruned = torch.isclose(zeros, param).sum()
         total += param.numel()
-    return total
+        pruned_total += (param.numel() - pruned)
+    return total, pruned_total
+
+from torch.utils.flop_counter import FlopCounterMode
+
+def get_flops(model, inp: Union[torch.Tensor, Tuple], with_backward=False):
+    
+    istrain = model.training
+    model.eval()
+    
+    inp = inp if isinstance(inp, torch.Tensor) else torch.randn(inp).cuda()
+
+    flop_counter = FlopCounterMode(mods=model, display=False, depth=None)
+    with flop_counter:
+        if with_backward:
+            model(inp).sum().backward()
+        else:
+            model(inp)
+    total_flops =  flop_counter.get_total_flops()
+    if istrain:
+        model.train()
+    return total_flops
 
 
-def evaluate(folder, dataset, save_dir, ensemble=False):
-
+def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
+    # from robustbench.utils import load_model
     datasetc = dataset + str("c")
     os.makedirs(os.path.join(save_dir, datasetc), exist_ok=True)
 
@@ -123,7 +148,11 @@ def evaluate(folder, dataset, save_dir, ensemble=False):
     print(models)
 
     results = collections.defaultdict(dict)
-    _, test_loader_clean = getData(name=dataset, train_bs=128, test_bs=1024)
+    _, test_loader_clean = getData(name=dataset, train_bs=128, test_bs=1024, normalize=normalize)
+    if dataset.startswith("cifar"):
+        size = (1, 3, 32, 32)
+    else:
+        assert(False) # Todo
 
     if ensemble:
         data = [torch.load(folder + m).eval() for m in models]
@@ -135,10 +164,14 @@ def evaluate(folder, dataset, save_dir, ensemble=False):
             model = m 
             m = folder.strip("/").split("/")[-1]
         else:
-            model = torch.load(folder + m)
+            model = torch.load(folder + m, map_location="cuda")
             print(m)
             model.eval()
-            print(f"Number of Parameters: {get_parameter_count(model)}")
+            num_params, after_pruning = get_parameter_count(model)
+            sparsity = 1.0 - after_pruning / num_params 
+            flops = get_flops(model, size)
+            print(f"Number of Parameters: {num_params/1000000.0:.2f}M, After Pruning: {after_pruning/1000000.0:.2f}M, Sparsity: {100.0 * sparsity: .1f}%")
+            print(f"Estimated FLOPs: {flops / 1000000:.0f}M")
         
         # Clean Accuracy
         clean_test_acc = cls_validate(test_loader_clean, model, time_begin=None)
@@ -154,7 +187,7 @@ def evaluate(folder, dataset, save_dir, ensemble=False):
             
             temp_results = []
             for severity in SEVERITIES:
-                _, test_loader = getData(name=datasetc, train_bs=128, test_bs=1024, severity=severity, noise=noise)
+                _, test_loader = getData(name=datasetc, train_bs=128, test_bs=1024, severity=severity, noise=noise, normalize=normalize)
                 result_m = cls_validate(test_loader, model)
                 results[m][noise][severity] = result_m
                 rob_test_acc.append(result_m)
@@ -184,10 +217,11 @@ if __name__ == '__main__':
     parser.add_argument("--dataset", type=str, default='cifar10', required=False, help='dataset')
     parser.add_argument("--batch_size", default=1000, type=int, help='batch size')
     parser.add_argument("--ensemble", type=int, default=0, help="Ensemble models in folder")
+    parser.add_argument("--normalize", type=int, default=1, help="Normalize in dataloader")
     args = parser.parse_args()
 
     test_batch_size = args.batch_size
     os.makedirs('eval_results', exist_ok=True)
-    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0)
+    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0, normalize=args.normalize != 0)
 
 

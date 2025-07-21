@@ -16,7 +16,7 @@ import json
 import tqdm
 
 from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, VIT
-from kd_utils import dkd_loss, freeze
+from kd_utils import dkd_loss, freeze, DistillKL, CRDLoss, CIFAR10InstanceSample
 
 
 import torch
@@ -83,6 +83,8 @@ parser.add_argument('--sparse_level', type=float,
 # Distillation
 parser.add_argument('--distill', action='store_true',
                     help="Enable distillation")
+parser.add_argument('--crd', action='store_true', help="Enable Contrastive Representation Distillation")
+parser.add_argument('--crd_beta', type=float, default=0.4) # CRD it is 0.8 but I think this is huge 
 parser.add_argument('--dkd', action='store_true',
                     help="Enable DKD Loss in place of JSD Loss")
 parser.add_argument('--dkd_alpha', type=float, default=1.0,
@@ -134,6 +136,8 @@ def cosine_param_schedule(epoch, total_epochs, start, end):
 
 if args.distill:
     teacher_net = torch.load(args.teacher_path)
+    if isinstance(teacher_net, torch.nn.DataParallel):
+        teacher_net = teacher_net.module
     teacher_net.eval()
     freeze(teacher_net)
     if args.kd_schedule == "log":
@@ -162,7 +166,7 @@ def get_mix(logits_all, num_images):
     return t_p_mixture, t_logits_clean
 
 
-def train(net, train_loader, optimizer, scheduler, epoch=0):
+def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
     """Train for one epoch."""
     net.train()
     loss_ema = 0.
@@ -170,27 +174,62 @@ def train(net, train_loader, optimizer, scheduler, epoch=0):
     criterion = torch.nn.CrossEntropyLoss().cuda()
     pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch}", disable=not args.tqdm)
     optimizer.zero_grad()
-    for i, (images, targets) in pbar:
+
+    if args.crd:
+        features = {}
+        def get_features(name):
+            def hook(_model, input):
+                features[name] = input
+            return hook
+        handle_student = net.linear.register_forward_pre_hook(get_features('student'))
+        handle_teacher = teacher_net.linear.register_forward_pre_hook(get_features('teacher'))
+
+
+    for i, data in pbar:
+        if args.crd: 
+            (images, targets, pos_idx, neg_idx) = data
+            (pos_idx, neg_idx) = (pos_idx.cuda(), neg_idx.cuda())
+        else: 
+            (images, targets) = data
+
+        bs = targets.size(0)
 
         if args.jsd == 0:
             images = images.cuda()
             targets = targets.cuda()
-
+            loss = 0.0
             if args.alpha == 0.0:
                 outputs = net(images)
             else:
+                torch_rng_backup = torch.Generator(
+                    device="cuda").set_state(torch_rng.get_state())
+                numpy_rng_backup = deepcopy(numpy_rng)
                 outputs, targets_a, targets_b, lam = net(images, targets=targets, jsd=args.jsd,
+                                                         numpy_gen=numpy_rng,
+                                                         torch_gen=torch_rng,
                                                          mixup_alpha=args.alpha,
                                                          manifold_mixup=args.manifold_mixup,
                                                          add_noise_level=args.add_noise_level,
                                                          mult_noise_level=args.mult_noise_level,
                                                          sparse_level=args.sparse_level)
+                # if args.distill: 
+                #     kd_loss = DistillKL(args.kd_temp)
+                #     teacher_outputs, _, _, _ = net(images, targets=targets, jsd=args.jsd,
+                #                                          numpy_gen=numpy_rng_backup,
+                #                                          torch_gen=torch_rng_backup,
+                #                                          mixup_alpha=args.alpha,
+                #                                          manifold_mixup=args.manifold_mixup,
+                #                                          add_noise_level=args.add_noise_level,
+                #                                          mult_noise_level=args.mult_noise_level,
+                #                                          sparse_level=args.sparse_level)
+                #     loss += args.kd_alpha * kd_loss(outputs, teacher_outputs)
+                    
 
             if args.alpha > 0:
-                loss = mixup_criterion(
+                loss += mixup_criterion(
                     criterion, outputs, targets_a, targets_b, lam)
             else:
-                loss = criterion(outputs, targets)
+                loss += criterion(outputs, targets)
 
         elif args.jsd == 1:
             images_all = torch.cat(images, 0).cuda()
@@ -203,7 +242,7 @@ def train(net, train_loader, optimizer, scheduler, epoch=0):
             if args.alpha == 0.0:
                 logits_all = net(images_all)
             else:
-                logits_all, targets_a, targets_b, lam = net(images_all, targets=targets, jsd=args.jsd,
+                logits_all, targets_a, targets_b, lam, _ = net(images_all, targets=targets, jsd=args.jsd,
                                                             numpy_gen=numpy_rng,
                                                             torch_gen=torch_rng,
                                                             mixup_alpha=args.alpha,
@@ -223,11 +262,12 @@ def train(net, train_loader, optimizer, scheduler, epoch=0):
 
             if args.distill:
                 # loss *= args.reward
+                # Todo does this need grad info? 
                 with torch.no_grad():
                     if args.alpha == 0:
                         t_logits_all = teacher_net(images_all)
                     else:
-                        t_logits_all, t_targets_a, t_targets_b, t_lam = teacher_net(images_all, targets=targets, jsd=args.jsd,
+                        t_logits_all, t_targets_a, t_targets_b, _, mixup_index = teacher_net(images_all, targets=targets, jsd=args.jsd,
                                                                                     numpy_gen=numpy_rng_backup,
                                                                                     torch_gen=torch_rng_backup,
                                                                                     mixup_alpha=args.alpha,
@@ -237,6 +277,21 @@ def train(net, train_loader, optimizer, scheduler, epoch=0):
                                                                                     sparse_level=args.sparse_level)
 
                     t_p_mixture, t_logits_clean = get_mix(t_logits_all, num_images)
+
+                if args.crd:
+                    # loss_kd = criterion_kd(f_s, f_t, index, contrast_idx) 
+                    s_split = torch.split(features["student"][0], bs, dim=0)
+                    t_split = torch.split(features["teacher"][0], bs, dim=0)
+                    stop = int(neg_idx.size(1) * lam) 
+                    left = neg_idx
+                    right = neg_idx[mixup_index]
+                    # assert((right[0] == left[mixup_index[0]]).all())
+                    use_neg = torch.cat((left[:, :stop], right[:, stop:]), dim=1)
+                    # pct = (use_neg == neg_idx).sum() / use_neg.numel()
+                    loss_from_crd = 0.0
+                    for s, t in zip(s_split, t_split):
+                        loss_from_crd += args.crd_beta * crd_loss(s, t, pos_idx, use_neg).item()
+                    loss += loss_from_crd / 3.0
                 # with torch.no_grad():
                 #   if args.alpha != 0:
                 #     assert(torch.allclose(t_targets_a, targets_a))
@@ -259,12 +314,10 @@ def train(net, train_loader, optimizer, scheduler, epoch=0):
                 p_mixture = torch.clamp(
                     (p_clean + p_aug1 + p_aug2) / 3., 1e-7, 1).log()
             if args.dkd:
-                if lam > 0.5:
-                    proxy_target = t_targets_a
-                else:
-                    proxy_target = t_targets_b
-                dkd = dkd_loss(logits_clean, t_logits_clean, proxy_target, args.dkd_alpha, 
-                                 args.dkd_beta, args.kd_temp)
+                dkd = 0.125 * lam * dkd_loss(logits_clean, t_logits_clean, t_targets_a, args.dkd_alpha, 
+                    args.dkd_beta, args.kd_temp)
+                dkd += 0.125 * (1.0 - lam) * dkd_loss(logits_clean, t_logits_clean, t_targets_b, args.dkd_alpha, 
+                    args.dkd_beta, args.kd_temp)
                 loss += dkd
                 
             loss += 12 * (F.kl_div(p_mixture, p_clean, reduction='batchmean') +
@@ -280,6 +333,10 @@ def train(net, train_loader, optimizer, scheduler, epoch=0):
 
         loss_ema = loss_ema * 0.9 + float(loss) * 0.1
         pbar.set_postfix_str(f"Train Loss: {loss_ema:.3f}")
+
+    if args.crd:
+        handle_student.remove()
+        handle_teacher.remove()
     
     return loss_ema
 
@@ -325,12 +382,16 @@ def main():
              ])
 
     if args.dataset == 'cifar10':
-        train_data = datasets.CIFAR10(
-            './data/cifar', train=True, transform=train_transform, download=True)
+        if args.crd :
+            train_data = CIFAR10InstanceSample('./data/cifar', train=True, transform=train_transform, download=True)
+        else:
+            train_data = datasets.CIFAR10(
+                './data/cifar', train=True, transform=train_transform, download=True)
         test_data = datasets.CIFAR10(
             './data/cifar', train=False, transform=test_transform, download=True)
         num_classes = 10
     else:
+        assert(not args.crd)
         train_data = datasets.CIFAR100(
             './data/cifar', train=True, transform=train_transform, download=True)
         test_data = datasets.CIFAR100(
@@ -338,7 +399,7 @@ def main():
         num_classes = 100
 
     if args.augmix == 1:
-        train_data = AugMixDataset(train_data, preprocess, args.jsd, args)
+        train_data = AugMixDataset(train_data, preprocess, args.jsd, args, contrastive=args.crd)
 
     train_loader = torch.utils.data.DataLoader(
         train_data, batch_size=args.train_batch_size,
@@ -365,7 +426,22 @@ def main():
         net = VIT(ViTModel.from_pretrained('google/vit-base-patch16-224-in21k').cuda(), processor, num_classes=num_classes)
         # inputs = processor(images=data, return_tensors="pt", do_normalize=False, do_rescale=False)
 
-    optimizer = torch.optim.SGD(net.parameters(),
+    if args.crd:
+        t_features = teacher_net.linear.weight.size()[1]
+        s_features = net.linear.weight.size()[1]
+        crd_loss = CRDLoss(s_dim=s_features, t_dim=t_features).cuda()
+        #module_list.append(crd_loss.embed_s)
+        #module_list.append(crd_loss.embed_t)
+        model_params = list(net.parameters())
+        for name, param in crd_loss.embed_s.named_parameters():
+            model_params.append(param)
+        for name, param in crd_loss.embed_t.named_parameters():
+            model_params.append(param)
+    else:
+        crd_loss = None
+        model_params = net.parameters()
+
+    optimizer = torch.optim.SGD(model_params,
                                 args.learning_rate, momentum=args.momentum,
                                 weight_decay=args.decay, nesterov=True)
 
@@ -387,7 +463,7 @@ def main():
     loss_data = []
     for epoch in range(start_epoch, args.epochs):
         train_loss_ema = train(
-            net, train_loader, optimizer, scheduler, epoch=epoch)
+            net, train_loader, optimizer, scheduler, epoch=epoch, crd_loss=crd_loss)
         test_loss, test_acc = test(net, test_loader)
 
         is_best = test_acc > best_acc

@@ -130,7 +130,7 @@ class ResNetBase(nn.Module):
             k = numpy_gen.choice(range(len(self.blocks)), 1)[0]
         if k == 0: # Do input mixup if k is 0 
           # Clone is necessary for KD because otherwise the original images are modified in place!
-          x, targets_a, targets_b, lam = do_noisy_mixup(x.clone(), targets, numpy_gen, torch_gen, jsd=jsd, alpha=mixup_alpha, 
+          x, targets_a, targets_b, lam, mix_idx = do_noisy_mixup(x.clone(), targets, numpy_gen, torch_gen, jsd=jsd, alpha=mixup_alpha, 
                                               add_noise_level=add_noise_level, 
                                               mult_noise_level=mult_noise_level,
                                               sparse_level=sparse_level)
@@ -140,7 +140,7 @@ class ResNetBase(nn.Module):
         for i, ResidualBlock in enumerate(self.blocks):
             out = ResidualBlock(out)
             if k == (i+1): # Do manifold mixup if k is greater 0
-                out, targets_a, targets_b, lam = do_noisy_mixup(out, targets, numpy_gen, torch_gen, jsd=jsd, alpha=mixup_alpha, 
+                out, targets_a, targets_b, lam, mix_idx = do_noisy_mixup(out, targets, numpy_gen, torch_gen, jsd=jsd, alpha=mixup_alpha, 
                                            add_noise_level=add_noise_level, 
                                            mult_noise_level=mult_noise_level,
                                            sparse_level=sparse_level)
@@ -153,7 +153,7 @@ class ResNetBase(nn.Module):
         out = self.linear(out)
         
         if mixup_alpha > 0.0:
-            return out, targets_a, targets_b, lam
+            return out, targets_a, targets_b, lam, mix_idx
         else:
             return out
 

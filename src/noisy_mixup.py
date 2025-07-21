@@ -40,7 +40,7 @@ def do_noisy_mixup(x, y, numpy_gen: np.random.Generator, torch_gen: torch.Genera
      
     y_a, y_b = y, y[index]
     
-    return x, y_a, y_b, lam
+    return x, y_a, y_b, lam, index
 
 def mixup_criterion(criterion, pred, y_a, y_b, lam):
     return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)

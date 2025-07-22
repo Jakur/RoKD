@@ -288,10 +288,10 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                     # assert((right[0] == left[mixup_index[0]]).all())
                     use_neg = torch.cat((left[:, :stop], right[:, stop:]), dim=1)
                     # pct = (use_neg == neg_idx).sum() / use_neg.numel()
-                    loss_from_crd = 0.0
-                    for s, t in zip(s_split, t_split):
-                        loss_from_crd += args.crd_beta * crd_loss(s, t, pos_idx, use_neg).item()
-                    loss += loss_from_crd / 3.0
+                    s_repr = torch.mean(torch.stack(s_split, dim=0), dim=0)
+                    t_repr = torch.mean(torch.stack(t_split, dim=0), dim=0)
+                    loss_from_crd = args.crd_beta * crd_loss(s_repr, t_repr, pos_idx, use_neg).item()
+                    loss += loss_from_crd
                 # with torch.no_grad():
                 #   if args.alpha != 0:
                 #     assert(torch.allclose(t_targets_a, targets_a))

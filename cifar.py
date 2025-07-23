@@ -15,8 +15,8 @@ import time
 import json
 import tqdm
 
-from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, VIT
-from kd_utils import dkd_loss, freeze, DistillKL, CRDLoss, CIFAR10InstanceSample
+from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, VIT, Ensemble
+from kd_utils import dkd_loss, freeze, DistillKL, CRDLoss, CIFAR10InstanceSample, strip_dataparallel
 
 
 import torch
@@ -136,8 +136,11 @@ def cosine_param_schedule(epoch, total_epochs, start, end):
 
 if args.distill:
     teacher_net = torch.load(args.teacher_path)
-    if isinstance(teacher_net, torch.nn.DataParallel):
-        teacher_net = teacher_net.module
+    teacher_net = strip_dataparallel(teacher_net)
+    if isinstance(teacher_net, Ensemble):
+         # Todo fix this properly later
+        teacher_net.models = torch.nn.ModuleList([strip_dataparallel(m) for m in teacher_net.models])
+        teacher_net.linear = torch.nn.Identity()
     teacher_net.eval()
     freeze(teacher_net)
     if args.kd_schedule == "log":
@@ -427,8 +430,8 @@ def main():
         # inputs = processor(images=data, return_tensors="pt", do_normalize=False, do_rescale=False)
 
     if args.crd:
-        t_features = teacher_net.linear.weight.size()[1]
-        s_features = net.linear.weight.size()[1]
+        t_features = teacher_net.num_features()
+        s_features = net.num_features()
         crd_loss = CRDLoss(s_dim=s_features, t_dim=t_features).cuda()
         #module_list.append(crd_loss.embed_s)
         #module_list.append(crd_loss.embed_t)

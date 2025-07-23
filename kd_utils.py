@@ -8,6 +8,12 @@ from PIL import Image
 
 eps = 1e-7
 
+def strip_dataparallel(model):
+    if isinstance(model, torch.nn.DataParallel):
+        return model.module
+    else:
+        return model
+
 def freeze(model):
     for name, param in model.named_parameters():
         param.requires_grad_(False)

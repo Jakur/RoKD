@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from ..noisy_mixup import do_noisy_mixup
+from kd_utils import strip_dataparallel
 
 class PreActBlock(nn.Module):
     expansion = 1
@@ -112,10 +113,24 @@ class ResNetBase(nn.Module):
             layers.append(block(self.in_planes, planes, stride))
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
-
+    
+    def num_features(self):
+        return self.linear.weight.size(1)
+    
     def forward(self, x, targets=None, jsd=0, mixup_alpha=0.0, manifold_mixup=0, 
                 add_noise_level=0.0, mult_noise_level=0.0, sparse_level=1.0, numpy_gen=None, torch_gen=None):
-        
+        out = self.body_forward(x, targets, jsd, mixup_alpha, manifold_mixup, 
+                add_noise_level, mult_noise_level, sparse_level, numpy_gen, torch_gen)
+        if mixup_alpha > 0.0:
+            out, targets_a, targets_b, lam, mix_idx = out
+            out = self.linear(out)
+            return out, targets_a, targets_b, lam, mix_idx
+        else:
+            out = self.linear(out)
+            return out
+
+    def body_forward(self, x, targets, jsd, mixup_alpha, manifold_mixup, 
+                add_noise_level, mult_noise_level, sparse_level, numpy_gen, torch_gen):
         if mixup_alpha > 0.0:
             k = 0
             if torch_gen is None:
@@ -150,7 +165,7 @@ class ResNetBase(nn.Module):
                 
         out = F.avg_pool2d(out, out.size(dim=3)) # 4 for the normal models
         out = out.view(out.size(0), -1)
-        out = self.linear(out)
+        # out = self.linear(out)
         
         if mixup_alpha > 0.0:
             return out, targets_a, targets_b, lam, mix_idx
@@ -185,20 +200,30 @@ class ResNetBase(nn.Module):
 class Ensemble(nn.Module):
     def __init__(self, models: list[nn.Module]):
         super().__init__()
-        self.models = nn.ModuleList(models)
+        self.models = nn.ModuleList([strip_dataparallel(m) for m in models])
+        self.linear = nn.Identity() # Dummy variable for distillation 
+
+    def num_features(self):
+        return sum(net.linear.weight.size(1) for net in self.models)
 
     def forward(self, x, **kwargs):
         data = []
         extras = []
+        full_repr = []
         for model in self.models:
-            output = model(x, **kwargs)
+            output = model.body_forward(x, **kwargs)
             if isinstance(output, tuple):
                 extras.append(output[1:])
-                data.append(output[0])
+                full_repr.append(output[0])
+                data.append(model.linear(output[0]))
             else:
-                data.append(output)
+                full_repr.append(output)
+                data.append(model.linear(output))
+        full_repr = torch.cat(full_repr, dim=1)
+        _ = self.linear(full_repr)
         data = torch.stack(data, dim=0)
         average = torch.mean(data, dim=0)
+        # assert(self.num_features() == full_repr.size(1))
         # Average logits 
         if len(extras) > 0:
             return average, *extras[0]

@@ -204,23 +204,39 @@ class Ensemble(nn.Module):
         self.linear = nn.Identity() # Dummy variable for distillation 
 
     def num_features(self):
-        return sum(net.linear.weight.size(1) for net in self.models)
+        return max(net.linear.weight.size(1) for net in self.models)
 
-    def forward(self, x, **kwargs):
+    def forward(self, x, targets=None, jsd=0, mixup_alpha=0.0, manifold_mixup=0, 
+                add_noise_level=0.0, mult_noise_level=0.0, sparse_level=1.0, numpy_gen=None, torch_gen=None):
+        bs = x.size(0)
         data = []
         extras = []
         full_repr = []
+        num_features = self.num_features()
+        total_models = 0 
         for model in self.models:
-            output = model.body_forward(x, **kwargs)
+            total_models += 1
+            output = model.body_forward(x, targets, jsd, mixup_alpha, manifold_mixup, add_noise_level, mult_noise_level, 
+                                        sparse_level, numpy_gen, torch_gen)
             if isinstance(output, tuple):
                 extras.append(output[1:])
-                full_repr.append(output[0])
+                rep = output[0]
+                sz = (num_features - rep.size(1)) // 2
+                rep = F.pad(rep, (sz, sz), mode="constant")
+                full_repr.append(rep)
                 data.append(model.linear(output[0]))
             else:
-                full_repr.append(output)
+                rep = output
+                sz = (num_features - rep.size(1)) // 2
+                rep = F.pad(rep, (sz, sz), mode="constant")
+                full_repr.append(rep)
                 data.append(model.linear(output))
-        full_repr = torch.cat(full_repr, dim=1)
-        _ = self.linear(full_repr)
+        # full_repr = full_repr[-1]
+        # full_repr = torch.stack(full_repr, dim=1)
+        indices = torch.randint(total_models, size=[bs]).cuda()
+        full_repr = torch.where((indices == 0), full_repr[0].T, full_repr[1].T)
+        # full_repr = torch.cat(full_repr, dim=1)
+        _ = self.linear(full_repr.T)
         data = torch.stack(data, dim=0)
         average = torch.mean(data, dim=0)
         # assert(self.num_features() == full_repr.size(1))

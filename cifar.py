@@ -285,9 +285,14 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                     # loss_kd = criterion_kd(f_s, f_t, index, contrast_idx) 
                     s_split = torch.split(features["student"][0], bs, dim=0)
                     t_split = torch.split(features["teacher"][0], bs, dim=0)
-                    stop = int(neg_idx.size(1) * lam) 
+                    proportion = lam
                     left = neg_idx
                     right = neg_idx[mixup_index]
+                    if lam < 0.5:
+                        left, right = right, left
+                        proportion = 1.0 - lam
+                    assert(proportion >= 0.5)
+                    stop = int(neg_idx.size(1) * proportion) 
                     # assert((right[0] == left[mixup_index[0]]).all())
                     use_neg = torch.cat((left[:, :stop], right[:, stop:]), dim=1)
                     # pct = (use_neg == neg_idx).sum() / use_neg.numel()

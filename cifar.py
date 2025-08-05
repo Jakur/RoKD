@@ -283,8 +283,9 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
 
                 if args.crd:
                     # loss_kd = criterion_kd(f_s, f_t, index, contrast_idx) 
-                    s_split = torch.split(features["student"][0], bs, dim=0)
-                    t_split = torch.split(features["teacher"][0], bs, dim=0)
+                    rand = torch.softmax(torch.randn((3), generator=torch_rng, device="cuda"), dim=0).repeat_interleave(bs).unsqueeze(1)
+                    s_split = torch.split(rand * features["student"][0], bs, dim=0)
+                    t_split = torch.split((1.0 - rand) * features["teacher"][0], bs, dim=0)
                     proportion = lam
                     left = neg_idx
                     right = neg_idx[mixup_index]
@@ -296,8 +297,8 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                     # assert((right[0] == left[mixup_index[0]]).all())
                     use_neg = torch.cat((left[:, :stop], right[:, stop:]), dim=1)
                     # pct = (use_neg == neg_idx).sum() / use_neg.numel()
-                    s_repr = torch.mean(torch.stack(s_split, dim=0), dim=0)
-                    t_repr = torch.mean(torch.stack(t_split, dim=0), dim=0)
+                    s_repr = torch.sum(torch.stack(s_split, dim=0), dim=0)
+                    t_repr = torch.sum(torch.stack(t_split, dim=0), dim=0)
                     loss_from_crd = args.crd_beta * crd_loss(s_repr, t_repr, pos_idx, use_neg).item()
                     loss += loss_from_crd
                 # with torch.no_grad():

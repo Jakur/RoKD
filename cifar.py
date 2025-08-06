@@ -282,10 +282,13 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                     t_p_mixture, t_logits_clean = get_mix(t_logits_all, num_images)
 
                 if args.crd:
-                    # loss_kd = criterion_kd(f_s, f_t, index, contrast_idx) 
-                    rand = torch.softmax(torch.randn((3), generator=torch_rng, device="cuda"), dim=0).repeat_interleave(bs).unsqueeze(1)
-                    s_split = torch.split(rand * features["student"][0], bs, dim=0)
-                    t_split = torch.split((1.0 - rand) * features["teacher"][0], bs, dim=0)
+                    # loss_kd = criterion_kd(f_s, f_t, index, contrast_idx)
+                    rand = torch.randn((3), generator=torch_rng, device="cuda")
+                    rand2 = torch.softmax(rand, dim=0)
+                    rand = torch.softmax(-rand, dim=0)
+                    
+                    s_split = torch.split(rand.repeat_interleave(bs).unsqueeze(1) * features["student"][0], bs, dim=0)
+                    t_split = torch.split(rand2.repeat_interleave(bs).unsqueeze(1) * features["teacher"][0], bs, dim=0)
                     proportion = lam
                     left = neg_idx
                     right = neg_idx[mixup_index]

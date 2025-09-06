@@ -83,10 +83,8 @@ parser.add_argument('--sparse_level', type=float,
 # Distillation
 parser.add_argument('--distill', action='store_true',
                     help="Enable distillation")
-parser.add_argument('--crd', action='store_true', help="Enable Contrastive Representation Distillation")
+parser.add_argument('--extra_kd', type=str, default="none", choices=["none", "kd", "crd", "dkd"])
 parser.add_argument('--crd_beta', type=float, default=0.4) # CRD it is 0.8 but I think this is huge 
-parser.add_argument('--dkd', action='store_true',
-                    help="Enable DKD Loss in place of JSD Loss")
 parser.add_argument('--dkd_alpha', type=float, default=1.0,
                     help="DKD alpha parameter")
 parser.add_argument('--dkd_beta', type=float, default=8.0,
@@ -102,8 +100,15 @@ parser.add_argument('--kd_temp', type=float, default=4.0,
 
 start_time = int(time.time())
 args = parser.parse_args()
+args.crd = False
+args.dkd = False
+if args.extra_kd == "crd":
+    args.crd = True 
+if args.extra_kd == "dkd":
+    args.dkd = True
+
 print(vars(args))
-out_name = f'arch_{args.arch}_augmix_{args.augmix}_jsd_{args.jsd}_alpha_{args.alpha}_manimixup_{args.manifold_mixup}_addn_{args.add_noise_level}_multn_{args.mult_noise_level}_seed_{args.seed}_kd_{args.kd_alpha}'
+out_name = f'arch_{args.arch}_jsd_{args.jsd}_seed_{args.seed}_kd_{args.kd_alpha}_{args.kd_schedule}_{args.extra_kd}'
 
 if args.seed != 0:
     numpy_rng = np.random.default_rng(args.seed)

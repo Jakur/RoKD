@@ -15,7 +15,7 @@ import time
 import json
 import tqdm
 
-from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, VIT, Ensemble
+from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, halfwideresnet28, VIT, Ensemble
 from kd_utils import dkd_loss, freeze, DistillKL, CRDLoss, CIFAR10InstanceSample, strip_dataparallel
 
 
@@ -33,7 +33,7 @@ parser = argparse.ArgumentParser(
 parser.add_argument('--dataset', type=str, default='cifar10',
                     choices=['cifar10', 'cifar100'], help='Choose between CIFAR-10, CIFAR-100.')
 parser.add_argument('--arch', '-m', type=str, default='preactresnet18',
-                    choices=['preactresnet18', 'preactwideresnet18', 'wideresnet28', 'preactresnet20', 'preactresnet32', 'vit'], help='Choose architecture.')
+                    choices=['preactresnet18', 'preactwideresnet18', 'wideresnet28', 'preactresnet20', 'preactresnet32', 'vit', 'halfresnet28'], help='Choose architecture.')
 parser.add_argument('--seed', type=int, default=1,
                     metavar='S', help='random seed (default: 0)')
 parser.add_argument('--workers', type=int, default=4,
@@ -314,7 +314,7 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                 logits_clean, dim=1), F.softmax(
                     logits_aug1, dim=1), F.softmax(
                         logits_aug2, dim=1)
-
+            # JSD Teacher Mixing
             if args.distill:
                 alpha = kd_schedule(epoch, args.epochs, 0.0, args.kd_alpha)
                 assert (0.0 <= alpha and alpha <= 1.0)
@@ -428,6 +428,8 @@ def main():
         net = preactwideresnet18(num_classes=num_classes)
     elif args.arch == 'wideresnet28':
         net = wideresnet28(num_classes=num_classes)
+    elif args.arch == 'halfresnet28':
+        net = halfwideresnet28(num_classes=num_classes)
     elif args.arch == "preactresnet20":
         net = preactresnet20(num_classes=num_classes)
     elif args.arch == "preactresnet32":

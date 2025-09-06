@@ -2,6 +2,7 @@ import argparse
 import os
 
 import numpy as np
+import polars as pl 
 import torch
 import torch.optim
 import torch.utils.data
@@ -159,6 +160,8 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
         models = [Ensemble(data)]
         torch.save(models[0], f"{folder}/ensemble.pt")
 
+    results = []
+
     for index, m in enumerate(models):
         if ensemble:
             model = m 
@@ -183,13 +186,13 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
         rob_test_acc = []
         ece = []
         for noise in NOISE_TYPES:
-            results[m][noise] = collections.defaultdict(dict)
             
             temp_results = []
             for severity in SEVERITIES:
                 _, test_loader = getData(name=datasetc, train_bs=128, test_bs=1024, severity=severity, noise=noise, normalize=normalize)
                 result_m = cls_validate(test_loader, model)
-                results[m][noise][severity] = result_m
+                results.append({"model": m, "noise": noise, "severity": severity, "r_acc": result_m, "clean_acc": clean_test_acc})
+                # results[m][noise][severity] = result_m
                 rob_test_acc.append(result_m)
                 ece.append( get_calibration(test_loader, model, debug=False))
                 temp_results.append(result_m)
@@ -197,15 +200,17 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
             print('Distortion: {:15s}  | CE (unnormalized) (%): {:.2f}'.format(noise, 100 * np.mean(temp_results)))
 
             print(temp_results)
-            
-            
-        with open(f"{save_dir}/{datasetc}/robust_{m}.pickle", "wb") as f:
-            np.save(f, result_m)
+        
 
         print('***')
         print('Average Robust Accuracy: ', np.mean(rob_test_acc))
         print('ECE (%): {:.2f}'.format(np.mean(ece)* 100))
         print('***')
+
+    f = f"{folder}robust_results.csv"
+    df = pl.from_dicts(results)
+    print(df.head())
+    df.write_csv(f, include_header=True)
         
     return results
 

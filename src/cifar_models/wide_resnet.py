@@ -54,7 +54,7 @@ class Wide_ResNet(ResNetBase):
         k = widen_factor
 
         print('| Wide-Resnet %dx%d' %(depth, k))
-        nStages = [16, 16*k, 32*k, 64*k]
+        nStages = [16, int(16*k), int(32*k), int(64*k)]
 
         self.conv1 = conv3x3(3,nStages[0])
         self.layer1 = self._wide_layer(wide_basic, nStages[1], n, dropout_rate, stride=1)
@@ -77,7 +77,11 @@ class Wide_ResNet(ResNetBase):
 def WideResNet28(**kwargs):
     return Wide_ResNet(depth=28, widen_factor=4, dropout_rate=0.1, **kwargs)
 
+def HalfWideResNet28(**kwargs):
+    return Wide_ResNet(depth=28, widen_factor=2.5, dropout_rate=0.1, **kwargs)
+
 wideresnet28 = WideResNet28
+halfwideresnet28 = HalfWideResNet28
 
 def test():
     net = WideResNet()

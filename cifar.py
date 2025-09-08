@@ -16,7 +16,7 @@ import json
 import tqdm
 
 from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, halfwideresnet28, VIT, Ensemble
-from kd_utils import dkd_loss, freeze, DistillKL, CRDLoss, CIFAR10InstanceSample, strip_dataparallel
+from kd_utils import dkd_loss, freeze, RKDLoss, CRDLoss, CIFAR10InstanceSample, strip_dataparallel
 
 
 import torch
@@ -83,12 +83,16 @@ parser.add_argument('--sparse_level', type=float,
 # Distillation
 parser.add_argument('--distill', action='store_true',
                     help="Enable distillation")
-parser.add_argument('--extra_kd', type=str, default="none", choices=["none", "kd", "crd", "dkd"])
+parser.add_argument('--extra_kd', type=str, default="none", choices=["none", "rkd", "crd", "dkd"])
+parser.add_argument('--rkd_wd', type=int, default=25)
+parser.add_argument('--rkd_wa', type=int, default=50)
 parser.add_argument('--crd_beta', type=float, default=0.4) # CRD it is 0.8 but I think this is huge 
+parser.add_argument('--crd_randomize', action='store_true', help="Randomize weights of mixing representations")
 parser.add_argument('--dkd_alpha', type=float, default=1.0,
                     help="DKD alpha parameter")
 parser.add_argument('--dkd_beta', type=float, default=8.0,
                     help="DKD beta parameter")
+parser.add_argument('--dkd_all', action='store_true', help="Use normal and augment samples for DKD")
 parser.add_argument('--teacher-path', type=str,
                     help="Path to PyTorch saved model")
 parser.add_argument('--kd_alpha', '-a', type=float, default=0.0,
@@ -102,13 +106,19 @@ start_time = int(time.time())
 args = parser.parse_args()
 args.crd = False
 args.dkd = False
+args.rkd = False
+out_name = f'arch_{args.arch}_jsd_{args.jsd}_seed_{args.seed}_kd_{args.kd_alpha}_{args.kd_schedule}_{args.extra_kd}'
 if args.extra_kd == "crd":
     args.crd = True 
+    out_name += f"_{args.crd_beta}{args.crd_randomize}"
 if args.extra_kd == "dkd":
     args.dkd = True
+    out_name += f"_{args.dkd_alpha}a{args.dkd_beta}b{args.dkd_all}c"
+if args.extra_kd == "rkd":
+    args.rkd = True
+    out_name += f"_{args.rkd_wd}a{args.rkd_wa}"
 
 print(vars(args))
-out_name = f'arch_{args.arch}_jsd_{args.jsd}_seed_{args.seed}_kd_{args.kd_alpha}_{args.kd_schedule}_{args.extra_kd}'
 
 if args.seed != 0:
     numpy_rng = np.random.default_rng(args.seed)
@@ -183,7 +193,7 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
     pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch}", disable=not args.tqdm)
     optimizer.zero_grad()
 
-    if args.crd:
+    if args.crd or args.rkd:
         features = {}
         def get_features(name):
             def hook(_model, input):
@@ -288,12 +298,16 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
 
                 if args.crd:
                     # loss_kd = criterion_kd(f_s, f_t, index, contrast_idx)
-                    rand = torch.randn((3), generator=torch_rng, device="cuda")
-                    rand2 = torch.softmax(rand, dim=0)
-                    rand = torch.softmax(-rand, dim=0)
-                    
-                    s_split = torch.split(rand.repeat_interleave(bs).unsqueeze(1) * features["student"][0], bs, dim=0)
-                    t_split = torch.split(rand2.repeat_interleave(bs).unsqueeze(1) * features["teacher"][0], bs, dim=0)
+                    if args.crd_randomize:
+                        rand = torch.randn((3), generator=torch_rng, device="cuda")
+                        rand2 = torch.softmax(rand, dim=0)
+                        rand = torch.softmax(-rand, dim=0)
+                        
+                        s_split = torch.split(rand.repeat_interleave(bs).unsqueeze(1) * features["student"][0], bs, dim=0)
+                        t_split = torch.split(rand2.repeat_interleave(bs).unsqueeze(1) * features["teacher"][0], bs, dim=0)
+                    else:
+                        s_split = torch.split(features["student"][0], bs, dim=0)
+                        t_split = torch.split(features["teacher"][0], bs, dim=0)
                     proportion = lam
                     left = neg_idx
                     right = neg_idx[mixup_index]
@@ -302,16 +316,24 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                         proportion = 1.0 - lam
                     assert(proportion >= 0.5)
                     stop = int(neg_idx.size(1) * proportion) 
-                    # assert((right[0] == left[mixup_index[0]]).all())
                     use_neg = torch.cat((left[:, :stop], right[:, stop:]), dim=1)
-                    # pct = (use_neg == neg_idx).sum() / use_neg.numel()
-                    s_repr = torch.sum(torch.stack(s_split, dim=0), dim=0)
-                    t_repr = torch.sum(torch.stack(t_split, dim=0), dim=0)
+                    if args.crd_randomize:
+                        s_repr = torch.sum(torch.stack(s_split, dim=0), dim=0)
+                        t_repr = torch.sum(torch.stack(t_split, dim=0), dim=0)
+                    else:
+                        s_repr = torch.mean(torch.stack(s_split, dim=0), dim=0)
+                        t_repr = torch.mean(torch.stack(t_split, dim=0), dim=0)
                     loss_from_crd = args.crd_beta * crd_loss(s_repr, t_repr, pos_idx, use_neg).item()
                     loss += loss_from_crd
-                # with torch.no_grad():
-                #   if args.alpha != 0:
-                #     assert(torch.allclose(t_targets_a, targets_a))
+
+                if args.rkd:
+                    s_split = torch.split(features["student"][0], bs, dim=0)
+                    t_split = torch.split(features["teacher"][0], bs, dim=0)
+                    s_repr = torch.mean(torch.stack(s_split, dim=0), dim=0)
+                    t_repr = torch.mean(torch.stack(t_split, dim=0), dim=0)
+                    rkd_loss_fn = RKDLoss(args.rkd_wd, args.rkd_wa)
+                    loss += rkd_loss_fn(s_repr, t_repr)
+
 
             # JSD Loss
 
@@ -331,10 +353,19 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                 p_mixture = torch.clamp(
                     (p_clean + p_aug1 + p_aug2) / 3., 1e-7, 1).log()
             if args.dkd:
-                dkd = 0.125 * lam * dkd_loss(logits_clean, t_logits_clean, t_targets_a, args.dkd_alpha, 
-                    args.dkd_beta, args.kd_temp)
-                dkd += 0.125 * (1.0 - lam) * dkd_loss(logits_clean, t_logits_clean, t_targets_b, args.dkd_alpha, 
-                    args.dkd_beta, args.kd_temp)
+                if args.dkd_all:
+                    t_logits_clean, t_logits_aug1, t_logits_aug2 = torch.split(
+                        t_logits_all, num_images)
+                    check = [(logits_clean, t_logits_clean), (logits_aug1, t_logits_aug1), (logits_aug2, t_logits_aug2)]
+                else:
+                    check = [(logits_clean, t_logits_clean)]
+                for log, t_log in check:
+                    dkd = 0.125 * lam * dkd_loss(log, t_log, t_targets_a, args.dkd_alpha, 
+                        args.dkd_beta, args.kd_temp)
+                    dkd += 0.125 * (1.0 - lam) * dkd_loss(log, t_log, t_targets_b, args.dkd_alpha, 
+                        args.dkd_beta, args.kd_temp)
+                dkd /= len(check)
+
                 loss += dkd
                 
             loss += 12 * (F.kl_div(p_mixture, p_clean, reduction='batchmean') +
@@ -351,7 +382,7 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
         loss_ema = loss_ema * 0.9 + float(loss) * 0.1
         pbar.set_postfix_str(f"Train Loss: {loss_ema:.3f}")
 
-    if args.crd:
+    if args.crd or args.rkd:
         handle_student.remove()
         handle_teacher.remove()
     

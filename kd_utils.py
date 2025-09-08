@@ -22,6 +22,67 @@ def unfreeze(model):
     for name, param in model.named_parameters():
         param.requires_grad_(True)
 
+class NSTLoss(nn.Module):
+    """like what you like: knowledge distill via neuron selectivity transfer"""
+    def __init__(self):
+        super(NSTLoss, self).__init__()
+        pass
+
+    def forward(self, g_s, g_t):
+        return [self.nst_loss(f_s, f_t) for f_s, f_t in zip(g_s, g_t)]
+
+    def nst_loss(self, f_s, f_t):
+        s_H, t_H = f_s.shape[2], f_t.shape[2]
+        if s_H > t_H:
+            f_s = F.adaptive_avg_pool2d(f_s, (t_H, t_H))
+        elif s_H < t_H:
+            f_t = F.adaptive_avg_pool2d(f_t, (s_H, s_H))
+        else:
+            pass
+
+        f_s = f_s.view(f_s.shape[0], f_s.shape[1], -1)
+        f_s = F.normalize(f_s, dim=2)
+        f_t = f_t.view(f_t.shape[0], f_t.shape[1], -1)
+        f_t = F.normalize(f_t, dim=2)
+
+        # set full_loss as False to avoid unnecessary computation
+        full_loss = True
+        if full_loss:
+            return (self.poly_kernel(f_t, f_t).mean().detach() + self.poly_kernel(f_s, f_s).mean()
+                    - 2 * self.poly_kernel(f_s, f_t).mean())
+        else:
+            return self.poly_kernel(f_s, f_s).mean() - 2 * self.poly_kernel(f_s, f_t).mean()
+
+    def poly_kernel(self, a, b):
+        a = a.unsqueeze(1)
+        b = b.unsqueeze(2)
+        res = (a * b).sum(-1).pow(2)
+        return res
+
+class Attention(nn.Module):
+    """Paying More Attention to Attention: Improving the Performance of Convolutional Neural Networks
+    via Attention Transfer
+    code: https://github.com/szagoruyko/attention-transfer"""
+    def __init__(self, p=2):
+        super(Attention, self).__init__()
+        self.p = p
+
+    def forward(self, g_s, g_t):
+        return [self.at_loss(f_s, f_t) for f_s, f_t in zip(g_s, g_t)]
+
+    def at_loss(self, f_s, f_t):
+        s_H, t_H = f_s.shape[2], f_t.shape[2]
+        if s_H > t_H:
+            f_s = F.adaptive_avg_pool2d(f_s, (t_H, t_H))
+        elif s_H < t_H:
+            f_t = F.adaptive_avg_pool2d(f_t, (s_H, s_H))
+        else:
+            pass
+        return (self.at(f_s) - self.at(f_t)).pow(2).mean()
+
+    def at(self, f):
+        return F.normalize(f.pow(self.p).mean(1).view(f.size(0), -1))
+
 class RKDLoss(nn.Module):
     """Relational Knowledge Disitllation, CVPR2019"""
     def __init__(self, w_d=25, w_a=50):

@@ -16,7 +16,7 @@ import json
 import tqdm
 
 from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, halfwideresnet28, VIT, Ensemble
-from kd_utils import dkd_loss, freeze, RKDLoss, CRDLoss, CIFAR10InstanceSample, strip_dataparallel
+from kd_utils import dkd_loss, freeze, RKDLoss, CRDLoss, CIFAR10InstanceSample, strip_dataparallel, Attention, NSTLoss
 
 
 import torch
@@ -83,9 +83,9 @@ parser.add_argument('--sparse_level', type=float,
 # Distillation
 parser.add_argument('--distill', action='store_true',
                     help="Enable distillation")
-parser.add_argument('--extra_kd', type=str, default="none", choices=["none", "rkd", "crd", "dkd"])
-parser.add_argument('--rkd_wd', type=int, default=25)
-parser.add_argument('--rkd_wa', type=int, default=50)
+parser.add_argument('--extra_kd', type=str, default="none", choices=["none", "rkd", "crd", "dkd", "at", "nst"])
+parser.add_argument('--rkd_wd', type=float, default=25)
+parser.add_argument('--rkd_wa', type=float, default=50)
 parser.add_argument('--crd_beta', type=float, default=0.4) # CRD it is 0.8 but I think this is huge 
 parser.add_argument('--crd_randomize', action='store_true', help="Randomize weights of mixing representations")
 parser.add_argument('--dkd_alpha', type=float, default=1.0,
@@ -93,6 +93,8 @@ parser.add_argument('--dkd_alpha', type=float, default=1.0,
 parser.add_argument('--dkd_beta', type=float, default=8.0,
                     help="DKD beta parameter")
 parser.add_argument('--dkd_all', action='store_true', help="Use normal and augment samples for DKD")
+parser.add_argument('--at_beta', type=float, default=1000)
+parser.add_argument('--nst_beta', type=float, default=50)
 parser.add_argument('--teacher-path', type=str,
                     help="Path to PyTorch saved model")
 parser.add_argument('--kd_alpha', '-a', type=float, default=0.0,
@@ -107,6 +109,8 @@ args = parser.parse_args()
 args.crd = False
 args.dkd = False
 args.rkd = False
+args.at = False
+args.nst = False 
 out_name = f'arch_{args.arch}_jsd_{args.jsd}_seed_{args.seed}_kd_{args.kd_alpha}_{args.kd_schedule}_{args.extra_kd}'
 if args.extra_kd == "crd":
     args.crd = True 
@@ -117,6 +121,16 @@ if args.extra_kd == "dkd":
 if args.extra_kd == "rkd":
     args.rkd = True
     out_name += f"_{args.rkd_wd}a{args.rkd_wa}"
+if args.extra_kd == "at":
+    args.at = True
+    extra_kd_loss_fn = Attention()
+    extra_kd_weight = args.at_beta 
+    out_name += f"_{args.at_beta}"
+if args.extra_kd == "nst":
+    args.nst = True
+    extra_kd_loss_fn = NSTLoss()
+    extra_kd_weight = args.nst_beta
+    out_name += f"_{args.nst_beta}"
 
 print(vars(args))
 
@@ -192,15 +206,30 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
     criterion = torch.nn.CrossEntropyLoss().cuda()
     pbar = tqdm.tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch}", disable=not args.tqdm)
     optimizer.zero_grad()
-
+    features = {}
+    student_handles = []
+    teacher_handles = []
+    flatten_repr = lambda x: torch.mean(torch.stack(torch.split(features[x], bs, dim=0), dim=0), dim=0)
+    def get_pre_features(name):
+        def hook(_model, input):
+            features[name] = input
+        return hook
+    def get_features(name):
+        def hook(_model, _input, output):
+            features[name] = output
+        return hook
     if args.crd or args.rkd:
-        features = {}
-        def get_features(name):
-            def hook(_model, input):
-                features[name] = input
-            return hook
-        handle_student = net.linear.register_forward_pre_hook(get_features('student'))
-        handle_teacher = teacher_net.linear.register_forward_pre_hook(get_features('teacher'))
+        handle_student = net.linear.register_forward_pre_hook(get_pre_features('student'))
+        handle_teacher = teacher_net.linear.register_forward_pre_hook(get_pre_features('teacher'))
+        student_handles.append(handle_student)
+        teacher_handles.append(handle_teacher)
+    if args.at or args.nst:
+        student_handles.append(net.layer1.register_forward_hook(get_features("student1")))
+        student_handles.append(net.layer2.register_forward_hook(get_features("student2")))
+        student_handles.append(net.layer3.register_forward_hook(get_features("student3")))
+        teacher_handles.append(teacher_net.layer1.register_forward_hook(get_features("teacher1")))
+        teacher_handles.append(teacher_net.layer2.register_forward_hook(get_features("teacher2")))
+        teacher_handles.append(teacher_net.layer3.register_forward_hook(get_features("teacher3")))
 
 
     for i, data in pbar:
@@ -367,6 +396,11 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
                 dkd /= len(check)
 
                 loss += dkd
+            if args.at or args.nst:
+                s = [flatten_repr("student1"), flatten_repr("student2"), flatten_repr("student3")]
+                t = [flatten_repr("teacher1"), flatten_repr("teacher2"), flatten_repr("teacher3")]
+                loss += extra_kd_weight * sum(extra_kd_loss_fn(s, t))
+
                 
             loss += 12 * (F.kl_div(p_mixture, p_clean, reduction='batchmean') +
                         F.kl_div(p_mixture, p_aug1, reduction='batchmean') +
@@ -382,9 +416,10 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
         loss_ema = loss_ema * 0.9 + float(loss) * 0.1
         pbar.set_postfix_str(f"Train Loss: {loss_ema:.3f}")
 
-    if args.crd or args.rkd:
-        handle_student.remove()
-        handle_teacher.remove()
+    for handle in student_handles:
+        handle.remove()
+    for handle in teacher_handles:
+        handle.remove()
     
     return loss_ema
 

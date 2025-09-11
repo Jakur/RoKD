@@ -103,6 +103,7 @@ parser.add_argument('--kd_schedule', type=str,
                     default="linear", choices=["linear", "log", "cos", "const"])
 parser.add_argument('--kd_temp', type=float, default=4.0,
                     help="Temperature parameter for knowledge distillation")
+parser.add_argument('--save_freq', type=int, default=-1, help="Save every k epochs, -1 to disable")
 
 start_time = int(time.time())
 args = parser.parse_args()
@@ -559,6 +560,10 @@ def main():
             if not os.path.isdir(DESTINATION_PATH):
                 os.mkdir(DESTINATION_PATH)
             torch.save(net, OUT_DIR+'.pt')
+        if args.save_freq > 0 and epoch % args.save_freq == 0:
+            out = os.path.join(DESTINATION_PATH, f"ep{epoch}_" + out_name)
+            torch.save(net, out + '.pt')
+            
         info = 'Epoch {0:3d} | Train Loss {1:.4f} |'\
             ' Test Accuracy {2:.2f}'.format(
                 (epoch + 1), train_loss_ema, 100. * test_acc)

@@ -139,7 +139,7 @@ def get_flops(model, inp: Union[torch.Tensor, Tuple], with_backward=False):
     return total_flops
 
 
-def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
+def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True, force=False):
     # from robustbench.utils import load_model
     datasetc = dataset + str("c")
     os.makedirs(os.path.join(save_dir, datasetc), exist_ok=True)
@@ -161,7 +161,11 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
         torch.save(models[0], f"{folder}/ensemble.pt")
 
     results = []
-
+    results_path = f"{folder}robust_results.csv"
+    if not force:
+        if os.path.exists(results_path):
+            print("Already computed.")
+            return
     for index, m in enumerate(models):
         if ensemble:
             model = m 
@@ -207,10 +211,9 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
         print('ECE (%): {:.2f}'.format(np.mean(ece)* 100))
         print('***')
 
-    f = f"{folder}robust_results.csv"
     df = pl.from_dicts(results)
     print(df.head())
-    df.write_csv(f, include_header=True)
+    df.write_csv(results_path, include_header=True)
         
     return results
 
@@ -223,10 +226,11 @@ if __name__ == '__main__':
     parser.add_argument("--batch_size", default=1000, type=int, help='batch size')
     parser.add_argument("--ensemble", type=int, default=0, help="Ensemble models in folder")
     parser.add_argument("--normalize", type=int, default=1, help="Normalize in dataloader")
+    parser.add_argument("--force", type=int, default=0, help="Recompute even if cached data is present")
     args = parser.parse_args()
 
     test_batch_size = args.batch_size
     os.makedirs('eval_results', exist_ok=True)
-    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0, normalize=args.normalize != 0)
+    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0, normalize=args.normalize != 0, force=args.force > 0)
 
 

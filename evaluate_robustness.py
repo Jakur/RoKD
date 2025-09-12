@@ -139,7 +139,7 @@ def get_flops(model, inp: Union[torch.Tensor, Tuple], with_backward=False):
     return total_flops
 
 
-def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True, force=False):
+def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True, force=False, all_eps=False):
     # from robustbench.utils import load_model
     datasetc = dataset + str("c")
     os.makedirs(os.path.join(save_dir, datasetc), exist_ok=True)
@@ -172,6 +172,8 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True, force=Fa
             m = folder.strip("/").split("/")[-1]
         else:
             model = torch.load(folder + m, map_location="cuda")
+            if not all_eps and m.startswith("ep"):
+                continue
             print(m)
             model.eval()
             num_params, after_pruning = get_parameter_count(model)
@@ -227,10 +229,11 @@ if __name__ == '__main__':
     parser.add_argument("--ensemble", type=int, default=0, help="Ensemble models in folder")
     parser.add_argument("--normalize", type=int, default=1, help="Normalize in dataloader")
     parser.add_argument("--force", type=int, default=0, help="Recompute even if cached data is present")
+    parser.add_argument("--all", type=int, default=0, help="Enable to also benchmark epoch checkpoints")
     args = parser.parse_args()
 
     test_batch_size = args.batch_size
     os.makedirs('eval_results', exist_ok=True)
-    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0, normalize=args.normalize != 0, force=args.force > 0)
+    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0, normalize=args.normalize != 0, force=args.force > 0, all_eps=args.all)
 
 

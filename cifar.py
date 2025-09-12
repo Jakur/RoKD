@@ -16,7 +16,7 @@ import json
 import tqdm
 
 from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, halfwideresnet28, VIT, Ensemble
-from kd_utils import dkd_loss, freeze, RKDLoss, CRDLoss, CIFAR10InstanceSample, strip_dataparallel, Attention, NSTLoss
+from kd_utils import dkd_loss, freeze, RKDLoss, CRDLoss, CIFAR10InstanceSample, CIFAR100InstanceSample, strip_dataparallel, Attention, NSTLoss
 
 
 import torch
@@ -475,9 +475,11 @@ def main():
             './data/cifar', train=False, transform=test_transform, download=True)
         num_classes = 10
     else:
-        assert(not args.crd)
-        train_data = datasets.CIFAR100(
-            './data/cifar', train=True, transform=train_transform, download=True)
+        if args.crd:
+            train_data = CIFAR100InstanceSample('./data/cifar', train=True, transform=train_transform, download=True)
+        else:
+            train_data = datasets.CIFAR100(
+                './data/cifar', train=True, transform=train_transform, download=True)
         test_data = datasets.CIFAR100(
             './data/cifar', train=False, transform=test_transform, download=True)
         num_classes = 100

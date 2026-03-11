@@ -16,7 +16,7 @@ import json
 import tqdm
 
 from src.cifar_models import preactwideresnet18, preactresnet18, wideresnet28, preactresnet20, preactresnet32, halfwideresnet28, VIT, Ensemble
-from kd_utils import dkd_loss, freeze, RKDLoss, CRDLoss, CIFAR10InstanceSample, CIFAR100InstanceSample, strip_dataparallel, Attention, NSTLoss
+from kd_utils import dkd_loss, freeze, RKDLoss, CRDLoss, CIFAR10InstanceSample, CIFAR100InstanceSample, strip_dataparallel, Attention, NSTLoss, RLDLoss
 
 
 import torch
@@ -83,7 +83,7 @@ parser.add_argument('--sparse_level', type=float,
 # Distillation
 parser.add_argument('--distill', action='store_true',
                     help="Enable distillation")
-parser.add_argument('--extra_kd', type=str, default="none", choices=["none", "rkd", "crd", "dkd", "at", "nst"])
+parser.add_argument('--extra_kd', type=str, default="none", choices=["none", "rkd", "crd", "dkd", "at", "nst", "rld"])
 parser.add_argument('--rkd_wd', type=float, default=25)
 parser.add_argument('--rkd_wa', type=float, default=50)
 parser.add_argument('--crd_beta', type=float, default=0.4) # CRD it is 0.8 but I think this is huge 
@@ -95,6 +95,7 @@ parser.add_argument('--dkd_beta', type=float, default=8.0,
 parser.add_argument('--dkd_all', action='store_true', help="Use normal and augment samples for DKD")
 parser.add_argument('--at_beta', type=float, default=1000)
 parser.add_argument('--nst_beta', type=float, default=50)
+parser.add_argument('--rld_weight', type=float, default=1.0)
 parser.add_argument('--teacher-path', type=str,
                     help="Path to PyTorch saved model")
 parser.add_argument('--kd_alpha', '-a', type=float, default=0.0,
@@ -112,6 +113,7 @@ args.dkd = False
 args.rkd = False
 args.at = False
 args.nst = False 
+args.rld = False
 out_name = f'arch_{args.arch}_jsd_{args.jsd}_seed_{args.seed}_kd_{args.kd_alpha}_{args.kd_schedule}_{args.extra_kd}'
 if args.extra_kd == "crd":
     args.crd = True 
@@ -132,6 +134,10 @@ if args.extra_kd == "nst":
     extra_kd_loss_fn = NSTLoss()
     extra_kd_weight = args.nst_beta
     out_name += f"_{args.nst_beta}"
+if args.extra_kd == "rld":
+    args.rld = True
+    extra_kd_weight = args.rld_weight
+    out_name += f"_{args.rld_weight}"
 
 print(vars(args))
 
@@ -382,6 +388,12 @@ def train(net, train_loader, optimizer, scheduler, epoch=0, crd_loss=None):
             else:
                 p_mixture = torch.clamp(
                     (p_clean + p_aug1 + p_aug2) / 3., 1e-7, 1).log()
+                
+            if args.rld:
+                rld_loss_fn = RLDLoss()
+                rld_loss = extra_kd_weight * rld_loss_fn(logits_clean, t_logits_clean, targets)
+                loss += rld_loss
+
             if args.dkd:
                 if args.dkd_all:
                     t_logits_clean, t_logits_aug1, t_logits_aug2 = torch.split(

@@ -135,6 +135,77 @@ class RKDLoss(nn.Module):
         res[range(len(e)), range(len(e))] = 0
         return res
 
+def normalize(logit):
+    mean = logit.mean(dim=-1, keepdims=True)
+    stdv = logit.std(dim=-1, keepdims=True)
+    return (logit - mean) / (1e-7 + stdv)
+
+
+def rld_loss(logits_student_in, logits_teacher_in, target, alpha=1.0, beta=8.0, temperature=4.0, logit_stand=False, alpha_temperature=1.0):
+    logits_student = normalize(logits_student_in) if logit_stand else logits_student_in
+    logits_teacher = normalize(logits_teacher_in) if logit_stand else logits_teacher_in
+
+    # scd loss
+    student_gt_mask = _get_gt_mask(logits_student, target)
+    student_other_mask = _get_other_mask(logits_student, target)
+    max_index = torch.argmax(logits_teacher, dim=1)
+    teacher_max_mask = _get_gt_mask(logits_teacher, max_index)
+    teacher_other_mask = _get_other_mask(logits_teacher, max_index)
+    pred_student = F.softmax(logits_student / alpha_temperature, dim=1)
+    pred_teacher = F.softmax(logits_teacher / alpha_temperature, dim=1)
+    pred_student = cat_mask(pred_student, student_gt_mask, student_other_mask)
+    pred_teacher = cat_mask(pred_teacher, teacher_max_mask, teacher_other_mask)
+    log_pred_student = torch.log(pred_student)
+    scd_loss = F.kl_div(log_pred_student, pred_teacher, reduction='batchmean') * (alpha_temperature**2)
+
+    # mcd loss
+    mask = _get_ge_mask(logits_teacher, target)
+    assert mask.shape == logits_student.shape
+    masked_student = (logits_student / temperature).masked_fill(mask, -1e9)
+    log_pred_student_part2 = F.log_softmax(masked_student, dim=1)
+    masked_teacher = (logits_teacher / temperature).masked_fill(mask, -1e9)
+    pred_teacher_part2 = F.softmax(masked_teacher, dim=1)
+    mcd_loss = F.kl_div(log_pred_student_part2, pred_teacher_part2, reduction='batchmean') * (temperature**2)
+
+    return alpha * scd_loss + beta * mcd_loss
+
+
+def _get_ge_mask(logits, target):
+    assert logits.dim() == 2 and target.dim() == 1 and logits.size(0) == target.size(0)
+    gt_value = torch.gather(logits, 1, target.unsqueeze(1))
+    mask = torch.where(logits >= gt_value, 1, 0).bool()
+    return mask
+
+def _get_gt_mask(logits, target):
+    target = target.reshape(-1)
+    mask = torch.zeros_like(logits).scatter_(1, target.unsqueeze(1), 1).bool()
+    return mask
+
+def _get_other_mask(logits, target):
+    target = target.reshape(-1)
+    mask = torch.ones_like(logits).scatter_(1, target.unsqueeze(1), 0).bool()
+    return mask
+
+def cat_mask(t, mask1, mask2):
+    t1 = (t * mask1).sum(dim=1, keepdim=True)
+    t2 = (t * mask2).sum(dim=1, keepdim=True)
+    rt = torch.cat([t1, t2], dim=1)
+    return rt
+
+
+class RLDLoss(nn.Module):
+
+    def __init__(self):
+        super(RLDLoss, self).__init__()
+
+    def forward(self, logits_s, logits_t, target):
+        # Simple fix for mixup 
+        if target.ndim > 1:
+            target = target.argmax(dim=1)
+        # Todo warmup 
+        loss = rld_loss(logits_s, logits_t, target)
+        return loss
+
 class DistillKL(nn.Module):
     """Distilling the Knowledge in a Neural Network"""
     def __init__(self, T):

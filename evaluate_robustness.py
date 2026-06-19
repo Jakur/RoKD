@@ -2,10 +2,12 @@ import argparse
 import os
 
 import numpy as np
+import polars as pl 
 import torch
 import torch.optim
 import torch.utils.data
 import collections
+from safetensors.torch import save_file
 
 from src.get_data import NOISE_TYPES, SEVERITIES
 from src.get_data import getData
@@ -15,20 +17,26 @@ from torch import nn
 from torch.nn import functional as F
 from typing import Union, Tuple
 
-def cls_validate(val_loader, model, time_begin=None):
+def cls_validate(val_loader, model, name, save_tensors=False, out_dir="./"):
     model.eval()
     acc1_val = 0
     n = 0
+    tensors = []
     with torch.no_grad():
         for i, (images, target) in enumerate(val_loader):
             images = images.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
             output = model(images)
             model_logits = output[0] if (type(output) is tuple) else output
+            if save_tensors:
+                tensors.append(model_logits.cpu())
             pred = model_logits.data.max(1, keepdim=True)[1]
             acc1_val += pred.eq(target.data.view_as(pred)).cpu().sum().item()
             n += len(images)
     avg_acc1 = (acc1_val / n)
+    if save_tensors:
+        out = torch.cat(tensors, dim=0)
+        save_file({"logits": out}, f"{out_dir}{name}.safetensors")
     return avg_acc1
 
 class _ECELoss(nn.Module):
@@ -138,7 +146,7 @@ def get_flops(model, inp: Union[torch.Tensor, Tuple], with_backward=False):
     return total_flops
 
 
-def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
+def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True, force=False, all_eps=False, save_tensors=False):
     # from robustbench.utils import load_model
     datasetc = dataset + str("c")
     os.makedirs(os.path.join(save_dir, datasetc), exist_ok=True)
@@ -155,16 +163,24 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
         assert(False) # Todo
 
     if ensemble:
-        data = [torch.load(folder + m).eval() for m in models]
+        data = [torch.load(folder + m, weights_only=False).eval() for m in models]
         models = [Ensemble(data)]
         torch.save(models[0], f"{folder}/ensemble.pt")
 
+    results = []
+    results_path = f"{folder}robust_results.csv"
+    if not force:
+        if os.path.exists(results_path):
+            print("Already computed.")
+            return
     for index, m in enumerate(models):
         if ensemble:
             model = m 
             m = folder.strip("/").split("/")[-1]
         else:
-            model = torch.load(folder + m, map_location="cuda")
+            model = torch.load(folder + m, map_location="cuda", weights_only=False)
+            if not all_eps and m.startswith("ep"):
+                continue
             print(m)
             model.eval()
             num_params, after_pruning = get_parameter_count(model)
@@ -174,7 +190,7 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
             print(f"Estimated FLOPs: {flops / 1000000:.0f}M")
         
         # Clean Accuracy
-        clean_test_acc = cls_validate(test_loader_clean, model, time_begin=None)
+        clean_test_acc = cls_validate(test_loader_clean, model, "clean", save_tensors=False)
         print('Test Accuracy: ', clean_test_acc)
         ece = get_calibration(test_loader_clean, model, debug=False)
         print('Calibration: ', ece* 100)
@@ -183,13 +199,13 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
         rob_test_acc = []
         ece = []
         for noise in NOISE_TYPES:
-            results[m][noise] = collections.defaultdict(dict)
             
             temp_results = []
             for severity in SEVERITIES:
                 _, test_loader = getData(name=datasetc, train_bs=128, test_bs=1024, severity=severity, noise=noise, normalize=normalize)
-                result_m = cls_validate(test_loader, model)
-                results[m][noise][severity] = result_m
+                result_m = cls_validate(test_loader, model, f"{noise}_{severity}", save_tensors=save_tensors, out_dir=folder)
+                results.append({"model": m, "noise": noise, "severity": severity, "r_acc": result_m, "clean_acc": clean_test_acc})
+                # results[m][noise][severity] = result_m
                 rob_test_acc.append(result_m)
                 ece.append( get_calibration(test_loader, model, debug=False))
                 temp_results.append(result_m)
@@ -197,15 +213,16 @@ def evaluate(folder, dataset, save_dir, ensemble=False, normalize=True):
             print('Distortion: {:15s}  | CE (unnormalized) (%): {:.2f}'.format(noise, 100 * np.mean(temp_results)))
 
             print(temp_results)
-            
-            
-        with open(f"{save_dir}/{datasetc}/robust_{m}.pickle", "wb") as f:
-            np.save(f, result_m)
+        
 
         print('***')
         print('Average Robust Accuracy: ', np.mean(rob_test_acc))
         print('ECE (%): {:.2f}'.format(np.mean(ece)* 100))
         print('***')
+
+    df = pl.from_dicts(results)
+    print(df.head())
+    df.write_csv(results_path, include_header=True)
         
     return results
 
@@ -218,10 +235,14 @@ if __name__ == '__main__':
     parser.add_argument("--batch_size", default=1000, type=int, help='batch size')
     parser.add_argument("--ensemble", type=int, default=0, help="Ensemble models in folder")
     parser.add_argument("--normalize", type=int, default=1, help="Normalize in dataloader")
+    parser.add_argument("--force", type=int, default=0, help="Recompute even if cached data is present")
+    parser.add_argument("--all", type=int, default=0, help="Enable to also benchmark epoch checkpoints")
+    parser.add_argument("--save_logits", type=int, default=0, help="Save logits to disk")
     args = parser.parse_args()
 
     test_batch_size = args.batch_size
     os.makedirs('eval_results', exist_ok=True)
-    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0, normalize=args.normalize != 0)
+    evaluate(args.dir, args.dataset, 'eval_results', ensemble=args.ensemble != 0, normalize=args.normalize != 0, 
+             force=args.force > 0, all_eps=args.all, save_tensors=args.save_logits != 0)
 
 

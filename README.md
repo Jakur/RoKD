@@ -1,43 +1,25 @@
-## *NoisyMix*: Boosting Model Robustness and Accuracy
+## Robust Knowledge Distillation (RoKD): Boosting Robustness of Compressed Models
 
-It is well-known that deep learning models are typically [brittle to input perturbations](https://arxiv.org/abs/1312.6199), limiting their applicability in many real-world problems. Four common methods to improve model robustness to input perturbations are:
-- Data augmentations
-- Stability training
-- Mixup 
-- Noise injections
+This code implements our paper: Small Yet Robust: Knowledge Distillation Improves Out-of-Distribution Robustness in Compact Vision Models (ECML PKDD 2026). It is based on the codebase of [NoisyMix](https://github.com/erichson/NoisyMix) https://proceedings.mlr.press/v238/erichson24a.html, which is in turn based on the code from [AugMix](https://github.com/google-research/augmix) https://arxiv.org/abs/1912.02781. 
 
-**How can we leverage the strength of these methods to further improve both model robustness and test accuracy?**
+Our work focuses on improving the state-of-the-art in Out-of-Distribution robustness using knowledge distillation. Our RoKD framework can produce models which are compact, yet robust, and allows for ensembling models for fine-grained control of model overhead. 
 
-*NoisyMix* is a training scheme that judiciously combines all of the above components in a single setup to boost both robustness and accuracy. It implements [feature mixup](https://arxiv.org/abs/1806.05236) and [noise injections](https://arxiv.org/abs/2110.02180) on top of a [stability training scheme](https://arxiv.org/abs/1604.04326) on an [AugMix-augmented](https://arxiv.org/abs/1912.02781) data set. We choose the distance measure in the stability objective to be the Jensen-Shannon divergence (JSD). 
-
-The advantage of *NoisyMix* compared to other schemes is illustrated on the following binary classification task on a noisy toy dataset (without augmentation), where it can be seen that *NoisyMix* is most effective at smoothing the decision boundary and yields the best test accuracy.
-
-<p align="center">
-    <img src="figures/toy_result.png" height="400">
-</p>
-
-Compared to other data augmentation schemes, models trained with *NoisyMix* are more robust to common corruptions and generalize better. In particular, the advantage of *NoisyMix* is substantial when the models are evaluated on ImageNet-C and ImageNet-R, as shown by the following figure.
-
-<p align="center">
-    <img src="figures/cimagenet.png" height="300">
-</p>
-
-
-If you would like to use our code, you can simply train a ResNet-18 with *NoisyMix* on CIFAR-100 as follows.
-
-
+## Environment
 ```
-export CUDA_VISIBLE_DEVICES=0; python3 cifar.py --arch preactresnet18 --augmix 1 --jsd 1 --alpha 1.0 --manifold_mixup 1 --add_noise_level 0.5 --mult_noise_level 0.5 --sparse_level 0.65 --seed 1
+pip install lightly robustness gdown
+mkdir cifar10_models
+mkdir cifar100_models
 ```
-
-You can also simply train a Wide-ResNet-28x2 with *NoisyMix* on CIFAR-100 as follows.
-
+## Model Training 
 ```
+# Train a teacher model 
 export CUDA_VISIBLE_DEVICES=0; python3 cifar.py --arch wideresnet28 --augmix 1 --jsd 1 --alpha 1.0 --manifold_mixup 1 --add_noise_level 0.5 --mult_noise_level 0.5 --sparse_level 0.65 --seed 1
+
+# Train reduced size Wide ResNet-28 with distillation and CRD auxiliary KD
+export CUDA_VISIBLE_DEVICES=0; python3 cifar.py --arch halfresnet28 --augmix 1 --jsd 1 --alpha 1.0 --manifold_mixup 1 --add_noise_level 0.5 --mult_noise_level 0.5 --sparse_level 0.65 --seed 1 --distill --teacher-path ./teachers/wrn28_teacher.pt -a 0.5 --kd_schedule log --extra_kd crd
 ```
-
-
-
-
-For more details, please refer to the [paper](). If you find this work useful and use it on your own research, please concider citing our paper. Please also consider citing [Noisy Feature Mixup](https://arxiv.org/abs/2110.02180) and [AugMix](https://arxiv.org/abs/1912.02781).
+## Robust Evaluation 
+```
+for f in models/*; do python evaluate_robustness.py --dir $f/; done
+```
 
